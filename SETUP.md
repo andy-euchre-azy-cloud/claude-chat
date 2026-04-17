@@ -1,52 +1,56 @@
 # Claude Chat — Setup Guide
 
-A browser-based chat UI that wraps your local Claude Code CLI.
-Responses stream in real time. Supports voice input, TTS, mid-stream
-interrupt, and usage stats.
+> This document is written for Isaac's Claude Code instance on nerdbox.
+> Isaac: just hand this file to your Claude and it can handle the setup.
 
 ---
 
-## Prerequisites
+## What This Is
 
-- **Python 3.10+**
-- **Claude Code CLI** installed and authenticated on this machine
-  (`claude --version` should work; `claude -p "hi"` should return a response)
-
-That's it. The app talks to *your* Claude via the local `claude` binary —
-no API keys or extra config needed.
+A browser-based chat UI that wraps your local `claude` CLI. You type in
+a browser, responses stream in real time, with voice input, TTS,
+mid-stream interrupt, and a usage stats widget. It talks to *your*
+Claude via your local `claude` binary — no extra API keys needed.
 
 ---
 
-## Installation
+## What Claude Needs to Do
+
+### 1. Verify prerequisites
 
 ```bash
-git clone <repo-url> claude-chat
-cd claude-chat
+python3 --version        # needs 3.10+
+claude --version         # Claude Code must be installed
+claude -p "hi"           # must return a response (confirms auth)
+```
 
+If `claude` isn't installed or authenticated, stop here and sort that
+out first.
+
+### 2. Clone the repo and install dependencies
+
+```bash
+git clone <repo-url> ~/claude-chat
+cd ~/claude-chat
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
----
-
-## Running
+### 3. Run the app
 
 ```bash
 source venv/bin/activate
 python app.py
 ```
 
-Then open `http://localhost:5000` in your browser.
+Then open `http://localhost:5000`. Verify you get a response when you
+send a message.
 
-To expose it publicly, run a tunnel of your choice pointed at port 5000
-(e.g. Cloudflare Tunnel, ngrok, etc.).
+### 4. (Optional) Set up a systemd user service for persistence
 
----
-
-## Running as a systemd user service (optional)
-
-Create `~/.config/systemd/user/claude-chat.service`:
+Create `~/.config/systemd/user/claude-chat.service`, substituting the
+correct absolute path for the clone location:
 
 ```ini
 [Unit]
@@ -54,26 +58,35 @@ Description=Claude Chat Web App
 After=network.target
 
 [Service]
-WorkingDirectory=/path/to/claude-chat
-ExecStart=/path/to/claude-chat/venv/bin/python app.py
+WorkingDirectory=/home/isaac/claude-chat
+ExecStart=/home/isaac/claude-chat/venv/bin/python app.py
 Restart=on-failure
 
 [Install]
 WantedBy=default.target
 ```
 
-Then:
+Then enable it:
 
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now claude-chat.service
 ```
 
+### 5. (Optional) Expose it publicly
+
+Point a Cloudflare Tunnel, ngrok, or similar at `localhost:5000`.
+
 ---
 
-## Usage stats widget
+## Notes for Claude
 
-The usage bar in the top-right reads rate-limit headers from the
-Anthropic API using your Claude Code OAuth token
-(`~/.claude/.credentials.json`). It works automatically as long as
-Claude Code is installed and authenticated — no extra setup needed.
+- The app spawns a subprocess per message using `claude -p --resume`.
+  It will inherit whatever model and permissions the local `claude` is
+  configured with.
+- Usage stats are read from `~/.claude/.credentials.json` (Claude
+  Code's OAuth token). This is automatic — no manual config needed.
+- The session file lives at `~/claude-chat/.session_id` and persists
+  across restarts. Delete it to start a fresh conversation.
+- If something breaks, check `journalctl --user -u claude-chat.service`
+  or just run `python app.py` in the foreground to see output directly.

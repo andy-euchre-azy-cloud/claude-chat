@@ -30,7 +30,7 @@ out first.
 ### 2. Clone the repo and install dependencies
 
 ```bash
-git clone <repo-url> ~/claude-chat
+git clone https://github.com/andy-euchre-azy-cloud/claude-chat ~/claude-chat
 cd ~/claude-chat
 python3 -m venv venv
 source venv/bin/activate

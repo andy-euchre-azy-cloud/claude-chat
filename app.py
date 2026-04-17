@@ -175,7 +175,7 @@ def chat():
                 run_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd="/home/andy",
+                cwd=os.path.expanduser("~"),
             )
             with proc_lock:
                 current_proc = proc

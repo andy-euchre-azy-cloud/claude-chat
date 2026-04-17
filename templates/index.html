@@ -435,6 +435,8 @@ async function fetchUsage() {
 }
 
 async function switchModel(which) {
+    const label = which === 'sonnet' ? 'Sonnet' : 'Opus';
+    if (!confirm(`Switch to ${label}? This will reset the current session and clear the conversation.`)) return;
     const model = which === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-opus-4-6';
     const r = await fetch('/api/model', {
         method: 'POST',

@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+.session_id
+.token_usage
+.usage_raw.txt
+.usage_stats.json

@@ -82,6 +82,17 @@ body {
 #status-btn:hover { background: #3a3a5a; }
 #status-btn:disabled { opacity: 0.5; cursor: default; }
 
+#logout-btn {
+    padding: 6px 14px;
+    background: #2a2a4a;
+    color: #8a8aaa;
+    border: 1px solid #3a3a5a;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+}
+#logout-btn:hover { background: #3a3a5a; }
+
 .model-btn {
     padding: 6px 14px;
     background: #2a2a4a;
@@ -347,11 +358,17 @@ body {
 <div id="header">
     <h1>Claude Chat</h1>
     <div class="right">
-        <span id="usage-display"></span>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+            <span id="usage-display"></span>
+            <div id="usage-countdown" style="font-size:12px;color:#8a8aaa;font-variant-numeric:tabular-nums"></div>
+        </div>
         <button id="status-btn" onclick="fetchUsage()">Status</button>
         <button class="model-btn{% if model == 'claude-sonnet-4-6' %} active{% endif %}" onclick="switchModel('sonnet')">Sonnet</button>
         <button class="model-btn{% if model != 'claude-sonnet-4-6' %} active{% endif %}" onclick="switchModel('opus')">Opus</button>
         <button id="new-btn" onclick="newChat()">New Chat</button>
+        <form method="POST" action="/logout" style="margin:0">
+            <button type="submit" id="logout-btn">Sign Out</button>
+        </form>
     </div>
 </div>
 
@@ -410,6 +427,7 @@ function pctSpan(label, p, resetIso) {
 }
 
 async function fetchUsage() {
+    lastFetchTime = Date.now();
     const el = document.getElementById('usage-display');
     const btn = document.getElementById('status-btn');
     btn.disabled = true;
@@ -683,28 +701,58 @@ input.focus();
 // ===== TEXT TO SPEECH (voice output) =====
 let ttsEnabled = false;
 
+let ttsAudio = null;
+
 function toggleTTS() {
     ttsEnabled = !ttsEnabled;
     const btn = document.getElementById('tts-btn');
     btn.classList.toggle('active', ttsEnabled);
     btn.title = ttsEnabled ? 'Mute responses' : 'Read responses aloud';
-    if (!ttsEnabled) window.speechSynthesis.cancel();
+    if (!ttsEnabled && ttsAudio) { ttsAudio.pause(); ttsAudio = null; }
 }
 
 function speakText(text) {
     if (!ttsEnabled || !text) return;
-    window.speechSynthesis.cancel();
+    if (ttsAudio) { ttsAudio.pause(); ttsAudio = null; }
     const plain = text
         .replace(/```[\s\S]*?```/g, 'code block.')
         .replace(/`[^`]+`/g, '')
         .replace(/#{1,6}\s/g, '')
         .replace(/\*\*/g, '').replace(/\*/g, '')
         .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-        .replace(/\n+/g, ' ').trim();
-    const utt = new SpeechSynthesisUtterance(plain);
-    utt.rate = 1.05;
-    window.speechSynthesis.speak(utt);
+        .replace(/\n+/g, ' ').trim()
+        .slice(0, 300);
+    fetch('/tts', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: plain}),
+    })
+    .then(r => {
+        if (!r.ok) { console.error('TTS error:', r.status); return; }
+        return r.blob();
+    })
+    .then(blob => {
+        if (!blob) return;
+        ttsAudio = new Audio(URL.createObjectURL(blob));
+        ttsAudio.play().catch(e => console.error('Audio play failed:', e));
+    })
+    .catch(e => console.error('TTS fetch failed:', e));
 }
+
+// Auto-refresh status every 5 minutes
+let lastFetchTime = Date.now();
+fetchUsage();
+setInterval(fetchUsage, 5 * 60 * 1000);
+
+// Countdown to next auto-check
+setInterval(() => {
+    const el = document.getElementById('usage-countdown');
+    if (!el) return;
+    const remaining = Math.max(0, 300 - Math.floor((Date.now() - lastFetchTime) / 1000));
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    el.textContent = `next check in ${m}:${String(s).padStart(2, '0')}`;
+}, 1000);
 </script>
 </body>
 </html>

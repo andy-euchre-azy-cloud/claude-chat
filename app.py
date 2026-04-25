@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Web chat interface for Claude Code CLI with mid-stream messaging support."""
 
+import io
 import json
 import os
 import queue
@@ -8,10 +9,47 @@ import subprocess
 import threading
 import time
 import uuid
+from functools import wraps
 
-from flask import Flask, Response, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify, send_file, session, redirect, url_for
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+
+# ── Secret key (persisted so sessions survive restarts) ──────────────────────
+SECRET_KEY_FILE = os.path.expanduser('~/claude-chat/.secret_key')
+if os.path.exists(SECRET_KEY_FILE):
+    with open(SECRET_KEY_FILE) as f:
+        app.secret_key = f.read().strip()
+else:
+    import secrets as _secrets
+    app.secret_key = _secrets.token_hex(32)
+    with open(SECRET_KEY_FILE, 'w') as f:
+        f.write(app.secret_key)
+    os.chmod(SECRET_KEY_FILE, 0o600)
+
+# ── Session cookie hardening ─────────────────────────────────────────────────
+app.config['SESSION_COOKIE_SECURE'] = True      # only send over HTTPS
+app.config['SESSION_COOKIE_HTTPONLY'] = True     # no JS access to cookie
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'   # block cross-site POST sends
+app.config['PERMANENT_SESSION_LIFETIME'] = 86400 # 24h session timeout
+
+# ── User store ────────────────────────────────────────────────────────────────
+USERS_FILE = os.path.expanduser('~/claude-chat/users.json')
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE) as f:
+            return json.load(f)
+    return {}
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated
 
 SESSION_FILE  = os.path.expanduser('~/claude-chat/.session_id')
 USAGE_FILE    = os.path.expanduser('~/claude-chat/.usage_stats.json')
@@ -90,12 +128,71 @@ def kill_current():
             current_proc = None
 
 
+# ── Login rate limiting ───────────────────────────────────────────────────────
+_login_attempts = {}  # ip -> {'count': int, 'first': timestamp, 'locked_until': timestamp}
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_WINDOW = 300       # 5 minutes
+LOGIN_LOCKOUT = 900      # 15 minute lockout after too many failures
+
+
+def _get_client_ip():
+    return request.headers.get('CF-Connecting-IP',
+           request.headers.get('X-Forwarded-For', request.remote_addr))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        ip = _get_client_ip()
+        now = time.time()
+        info = _login_attempts.get(ip, {})
+
+        # Check if locked out
+        if info.get('locked_until', 0) > now:
+            remaining = int(info['locked_until'] - now)
+            mins = remaining // 60 + 1
+            error = f"Too many attempts. Try again in {mins} minute{'s' if mins != 1 else ''}."
+            return render_template("login.html", error=error)
+
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        users = load_users()
+        hashed = users.get(username)
+        if hashed and check_password_hash(hashed, password):
+            _login_attempts.pop(ip, None)
+            session.permanent = True
+            session['logged_in'] = True
+            session['username'] = username
+            return redirect(url_for('index'))
+
+        # Track failed attempt
+        if not info or now - info.get('first', 0) > LOGIN_WINDOW:
+            info = {'count': 1, 'first': now}
+        else:
+            info['count'] += 1
+        if info['count'] >= LOGIN_MAX_ATTEMPTS:
+            info['locked_until'] = now + LOGIN_LOCKOUT
+        _login_attempts[ip] = info
+
+        error = "Invalid username or password."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+
 @app.route("/")
+@login_required
 def index():
     return render_template("index.html", model=get_current_model())
 
 
 @app.route("/api/model", methods=["POST"])
+@login_required
 def api_set_model():
     """Switch the active model in Claude Code settings."""
     data = request.get_json()
@@ -119,6 +216,7 @@ def api_set_model():
 
 
 @app.route("/api/status")
+@login_required
 def api_status():
     """Return current session info."""
     busy = current_proc is not None and current_proc.poll() is None
@@ -130,6 +228,7 @@ def api_status():
 
 
 @app.route("/chat", methods=["POST"])
+@login_required
 def chat():
     global session_id, session_used, current_proc
 
@@ -297,6 +396,7 @@ def chat():
 
 
 @app.route("/api/usage")
+@login_required
 def api_usage():
     """Return token usage percentages. Always fetches fresh data."""
     try:
@@ -315,7 +415,57 @@ def api_usage():
         return jsonify({"error": "no data"}), 503
 
 
+PIPER_MODEL = os.path.expanduser("~/piper-voices/en_US-ryan-high.onnx")
+PIPER_PYTHON = os.path.expanduser("~/claude-chat/venv/bin/python3")
+
+@app.route("/tts", methods=["POST"])
+@login_required
+def tts():
+    """Convert text to speech using Piper and return a WAV audio stream."""
+    data = request.get_json()
+    text = (data or {}).get("text", "").strip()
+    if not text:
+        return jsonify({"error": "no text"}), 400
+
+    try:
+        proc = subprocess.run(
+            [PIPER_PYTHON, "-m", "piper", "--model", PIPER_MODEL, "--output-raw"],
+            input=text.encode("utf-8"),
+            capture_output=True,
+            timeout=30,
+            cwd=os.path.expanduser("~"),
+        )
+        if proc.returncode != 0:
+            return jsonify({"error": "piper failed", "detail": proc.stderr.decode()}), 500
+
+        # Piper --output-raw produces raw 16-bit mono PCM at 22050 Hz.
+        # Wrap it in a WAV header so browsers can play it directly.
+        pcm = proc.stdout
+        sample_rate = 22050
+        num_channels = 1
+        bits_per_sample = 16
+        byte_rate = sample_rate * num_channels * bits_per_sample // 8
+        block_align = num_channels * bits_per_sample // 8
+        data_size = len(pcm)
+        chunk_size = 36 + data_size
+
+        import struct
+        header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", chunk_size, b"WAVE",
+            b"fmt ", 16, 1, num_channels, sample_rate,
+            byte_rate, block_align, bits_per_sample,
+            b"data", data_size,
+        )
+        wav = io.BytesIO(header + pcm)
+        return send_file(wav, mimetype="audio/wav", as_attachment=False)
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "piper timed out"}), 504
+
+
 @app.route("/interrupt", methods=["POST"])
+@login_required
 def interrupt():
     """Kill the current response so the frontend can send a new message."""
     kill_current()
@@ -323,6 +473,7 @@ def interrupt():
 
 
 @app.route("/new", methods=["POST"])
+@login_required
 def new_chat():
     global session_id, session_used
     kill_current()
